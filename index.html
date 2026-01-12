@@ -168,34 +168,48 @@
 
 const startRaw = cur.start;
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+// Determine the raw end
 let rawEnd;
 
 if (next) {
   // Normal case: end at the next status start
   rawEnd = next.start;
+
+  // If next status has the same timestamp (or earlier due to data issues),
+  // force a minimum visible duration.
+  if (rawEnd <= startRaw) rawEnd = new Date(startRaw.getTime() + ONE_DAY_MS);
 } else {
-  // This is the LAST status for the project
-  const isActiveImpl =
-    cur.status.key === "ActiveImplementationConstructionDate";
+  // LAST status for the project
+  const isActiveImpl = cur.status.key === "ActiveImplementationConstructionDate";
 
   if (isActiveImpl) {
-    // Active Implementation / Construction runs up to today (clamped to MAX_END)
-    rawEnd = today;
+    // Active should only run to "today" if it has already started.
+    // If it starts in the future, show it planned through end of window.
+    rawEnd = (startRaw <= today) ? today : MAX_END;
   } else {
-    // Any other final status (Design, Substantial, Hold, Risk, Closed) runs to end of window
+    // Any other final status runs to end of window
     rawEnd = MAX_END;
   }
 }
 
-// Clamp start to window
+// Clamp to requested window
 const start = (startRaw < MIN_START) ? MIN_START : startRaw;
 
-// Clamp end to window (and to be safe if today > MAX_END)
-const end = (rawEnd > MAX_END) ? MAX_END : rawEnd;
+let end = rawEnd;
+if (end > MAX_END) end = MAX_END;
 
-// Skip segments outside or inverted
+// If clamping made it zero-length, force minimum duration (still within window)
+if (end <= start) {
+  const bumped = new Date(start.getTime() + ONE_DAY_MS);
+  end = (bumped > MAX_END) ? MAX_END : bumped;
+}
+
+// Skip if completely outside window
 if (start >= MAX_END) continue;
 if (end <= start) continue;
+
 
 
           items.push({
@@ -266,4 +280,5 @@ if (end <= start) continue;
   </script>
 </body>
 </html>
+
 
