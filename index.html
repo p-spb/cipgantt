@@ -166,16 +166,37 @@
           const cur = starts[i];
           const next = starts[i + 1] || null;
 
-          const startRaw = cur.start;
-          const rawEnd = next ? next.start : today;
+const startRaw = cur.start;
 
-          // Clamp to requested visible range
-          const start = (startRaw < MIN_START) ? MIN_START : startRaw;
-          const end = (rawEnd > MAX_END) ? MAX_END : rawEnd;
+let rawEnd;
 
-          // Skip segments outside or inverted
-          if (start >= MAX_END) continue;
-          if (end <= start) continue;
+if (next) {
+  // Normal case: end at the next status start
+  rawEnd = next.start;
+} else {
+  // This is the LAST status for the project
+  const isActiveImpl =
+    cur.status.key === "ActiveImplementationConstructionDate";
+
+  if (isActiveImpl) {
+    // Active Implementation / Construction runs up to today (clamped to MAX_END)
+    rawEnd = today;
+  } else {
+    // Any other final status (Design, Substantial, Hold, Risk, Closed) runs to end of window
+    rawEnd = MAX_END;
+  }
+}
+
+// Clamp start to window
+const start = (startRaw < MIN_START) ? MIN_START : startRaw;
+
+// Clamp end to window (and to be safe if today > MAX_END)
+const end = (rawEnd > MAX_END) ? MAX_END : rawEnd;
+
+// Skip segments outside or inverted
+if (start >= MAX_END) continue;
+if (end <= start) continue;
+
 
           items.push({
             id: `${pid}-${cur.status.key}`,
@@ -245,3 +266,4 @@
   </script>
 </body>
 </html>
+
