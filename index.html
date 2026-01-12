@@ -140,16 +140,25 @@
       const items = [];
 
       rows.sort((a, b) => {
-        const an = (a[PROJECT_NAME_FIELD] ?? "").toString().toLowerCase();
-        const bn = (b[PROJECT_NAME_FIELD] ?? "").toString().toLowerCase();
-        return an.localeCompare(bn);
-      });
+  const ai = a[PROJECT_ID_FIELD];
+  const bi = b[PROJECT_ID_FIELD];
+
+  // numeric-safe sort (handles strings too)
+  if (ai == null) return 1;
+  if (bi == null) return -1;
+  return ai > bi ? 1 : ai < bi ? -1 : 0;
+});
+
 
       for (const r of rows) {
         const pid = r[PROJECT_ID_FIELD];
         const pname = (r[PROJECT_NAME_FIELD] ?? "(Unnamed Project)").toString();
 
-        groups.push({ id: String(pid), content: pname });
+        groups.push({
+  id: String(pid),
+  content: `<strong>${pid}</strong>&nbsp;&nbsp;${pname}`
+});
+
 
         // Gather any status dates (unordered)
         const starts = [];
@@ -280,5 +289,6 @@ if (end <= start) continue;
   </script>
 </body>
 </html>
+
 
 
