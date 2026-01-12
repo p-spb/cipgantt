@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CIP Gantt Timeline</title>
+
+  <!-- vis-timeline (MIT) -->
+  <link href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/vis-data@7.1.9/peer/umd/vis-data.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #wrap { height: 100%; display: flex; flex-direction: column; }
+    #header {
+      padding: 10px 12px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    #status { opacity: .75; }
+    #timeline { flex: 1; }
+
+    /* Non-interactive */
+    #timeline { pointer-events: none; }
+    .vis-item { pointer-events: none; }
+    .vis-custom-time { pointer-events: none; }
+
+    /* Segment colors by status */
+    .seg-closed { background: #2e7d32; border-color: #2e7d32; color: #fff; }         /* green */
+    .seg-design { background: #1565c0; border-color: #1565c0; color: #fff; }         /* blue */
+    .seg-hold { background: #7b1fa2; border-color: #7b1fa2; color: #fff; }           /* purple */
+    .seg-risk { background: #c62828; border-color: #c62828; color: #fff; }           /* red */
+    .seg-substantial { background: #f2c6a0; border-color: #f2c6a0; color: #333; }    /* light peach */
+    .seg-active { background: #7ec8ff; border-color: #7ec8ff; color: #0b2a3a; }     /* light blue */
+
+    /* “Gantt bar” look */
+    .vis-item.vis-range { border-radius: 6px; }
+    .vis-item .vis-item-content { font-size: 12px; padding: 2px 6px; }
+
+    /* Today line styling */
+    .vis-custom-time.today-line {
+      background-color: rgba(0,0,0,0.35);
+      width: 2px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="wrap">
+    <div id="header">
+      <strong>CIP Timeline</strong>
+      <span id="status"></span>
+    </div>
+    <div id="timeline"></div>
+  </div>
+
+  <script>
+    // -----------------------------
+    // CONFIG
+    // -----------------------------
+    const FEATURESERVER_URL =
+      "https://services8.arcgis.com/F3eqpl8ixwADS2P2/arcgis/rest/services/CIP_Gantt_Chart_View/FeatureServer";
+    const LAYER_INDEX = 5;
+
+    const PROJECT_ID_FIELD = "ProjectID";
+    const PROJECT_NAME_FIELD = "Public_Project_Name";
+
+    const STATUSES = [
+      { key: "InDesignorProcurementDate", label: "In Design / Procurement", className: "seg-design" },
+      { key: "ActiveImplementationConstructionDate", label: "Active Implementation / Construction", className: "seg-active" },
+      { key: "SubstantialCompletionorTestingDate", label: "Substantial Completion / Testing", className: "seg-substantial" },
+      { key: "ClosedorCompleteDate", label: "Closed / Complete", className: "seg-closed" },
+      { key: "OnHold", label: "On Hold", className: "seg-hold" },
+      { key: "AtRiskorDelayed", label: "At Risk / Delayed", className: "seg-risk" }
+    ];
+
+    // Visible window: Oct 2025 through Sep 2026
+    const MIN_START = new Date("2025-10-01T00:00:00");
+    const MAX_END   = new Date("2026-09-30T23:59:59");
+
+    // -----------------------------
+    // HELPERS
+    // -----------------------------
+    const statusEl = document.getElementById("status");
+    const layerUrl = `${FEATURESERVER_URL}/${LAYER_INDEX}`;
+
+    function parseDate(val) {
+      if (val === null || val === undefined || val === "") return null;
+
+      // ArcGIS date fields: epoch ms
+      if (typeof val === "number" || (typeof val === "string" && /^\d+$/.test(val))) {
+        const d = new Date(Number(val));
+        return isNaN(d) ? null : d;
+      }
+
+      // ISO-ish string fallback
+      const d = new Date(val);
+      return isNaN(d) ? null : d;
+    }
+
+    async function fetchAllRows() {
+      const outFields = [PROJECT_ID_FIELD, PROJECT_NAME_FIELD, ...STATUSES.map(s => s.key)].join(",");
+      const pageSize = 2000;
+      let offset = 0;
+      let all = [];
+
+      while (true) {
+        const params = new URLSearchParams({
+          where: "1=1",
+          outFields,
+          returnGeometry: "false",
+          f: "json",
+          resultOffset: String(offset),
+          resultRecordCount: String(pageSize)
+        });
+
+        const resp = await fetch(`${layerUrl}/query?${params.toString()}`);
+        const json = await resp.json();
+
+        if (json.error) throw new Error(`${json.error.code}: ${json.error.message}`);
+
+        const rows = (json.features || []).map(f => f.attributes);
+        all = all.concat(rows);
+
+        if (rows.length < pageSize) break;
+        offset += pageSize;
+      }
+
+      return all;
+    }
+
+    function buildGroupsAndItems(rows) {
+      const today = new Date();
+
+      const groups = [];
+      const items = [];
+
+      rows.sort((a, b) => {
+        const an = (a[PROJECT_NAME_FIELD] ?? "").toString().toLowerCase();
+        const bn = (b[PROJECT_NAME_FIELD] ?? "").toString().toLowerCase();
+        return an.localeCompare(bn);
+      });
+
+      for (const r of rows) {
+        const pid = r[PROJECT_ID_FIELD];
+        const pname = (r[PROJECT_NAME_FIELD] ?? "(Unnamed Project)").toString();
+
+        groups.push({ id: String(pid), content: pname });
+
+        // Gather any status dates (unordered)
+        const starts = [];
+        for (const s of STATUSES) {
+          const d = parseDate(r[s.key]);
+          if (d) starts.push({ status: s, start: d });
+        }
+        if (starts.length === 0) continue;
+
+        // Sort chronologically (statuses don't need to be in a fixed order)
+        starts.sort((a, b) => a.start - b.start);
+
+        for (let i = 0; i < starts.length; i++) {
+          const cur = starts[i];
+          const next = starts[i + 1] || null;
+
+          const startRaw = cur.start;
+          const rawEnd = next ? next.start : today;
+
+          // Clamp to requested visible range
+          const start = (startRaw < MIN_START) ? MIN_START : startRaw;
+          const end = (rawEnd > MAX_END) ? MAX_END : rawEnd;
+
+          // Skip segments outside or inverted
+          if (start >= MAX_END) continue;
+          if (end <= start) continue;
+
+          items.push({
+            id: `${pid}-${cur.status.key}`,
+            group: String(pid),
+            content: cur.status.label,   // set "" if you want bars without text
+            start,
+            end,
+            type: "range",
+            className: cur.status.className
+          });
+        }
+      }
+
+      return { groups, items };
+    }
+
+    // -----------------------------
+    // RUN
+    // -----------------------------
+    (async () => {
+      try {
+        statusEl.textContent = "Loading…";
+
+        const rows = await fetchAllRows();
+        const { groups, items } = buildGroupsAndItems(rows);
+
+        statusEl.textContent = `${groups.length} projects, ${items.length} segments`;
+
+        const groupsDS = new vis.DataSet(groups);
+        const itemsDS = new vis.DataSet(items);
+
+        const container = document.getElementById("timeline");
+        const options = {
+          stack: false,
+          horizontalScroll: true,
+          zoomKey: "ctrlKey",
+
+          min: MIN_START,
+          max: MAX_END,
+
+          start: MIN_START,
+          end: MAX_END,
+
+          orientation: "top",
+          margin: { item: 6, axis: 8 }
+        };
+
+        const timeline = new vis.Timeline(container, itemsDS, groupsDS, options);
+
+        // Today vertical line (clamped into the window)
+        const now = new Date();
+        const todayClamped = (now < MIN_START) ? MIN_START : (now > MAX_END) ? MAX_END : now;
+        timeline.addCustomTime(todayClamped, "today");
+        const todayBar = timeline.customTimes["today"];
+        if (todayBar && todayBar.bar) todayBar.bar.classList.add("today-line");
+
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent = `Error: ${e.message}`;
+        document.getElementById("timeline").innerHTML =
+          `<div style="padding:12px;font-family:system-ui;color:#b00;">
+             CIP Timeline Error: ${e.message}<br>
+             Failed to load. Check layer index, field names, and sharing permissions.
+           </div>`;
+      }
+    })();
+  </script>
+</body>
+</html>
