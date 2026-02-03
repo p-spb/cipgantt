@@ -396,13 +396,52 @@ function overlaps(monthStart, monthEnd, s, e) {
   return s < monthEnd && e > monthStart;
 }
 
+// -----------------------------
+// XLSX STYLE HELPERS (required)
+// -----------------------------
+function hexToRgb(hex) {
+  const h = (hex || "").replace("#", "").trim();
+  if (h.length !== 6) return null;
+  const r = parseInt(h.slice(0,2), 16);
+  const g = parseInt(h.slice(2,4), 16);
+  const b = parseInt(h.slice(4,6), 16);
+  return { r, g, b };
+}
+
+// XLSX-js-style expects ARGB (no #) like "FFRRGGBB"
+function argb(hex) {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return "FFFFFFFF";
+  const to2 = n => n.toString(16).padStart(2,"0").toUpperCase();
+  return "FF" + to2(rgb.r) + to2(rgb.g) + to2(rgb.b);
+}
+
+function makeCell(value, fillHex, bold=false) {
+  const cell = { v: value, t: "s" };
+  cell.s = {
+    font: { name: "Calibri", sz: 11, bold },
+    alignment: { vertical: "center", horizontal: "left", wrapText: true },
+    border: {
+      top:    { style:"thin", color:{ rgb:"FFDDDDDD" } },
+      bottom: { style:"thin", color:{ rgb:"FFDDDDDD" } },
+      left:   { style:"thin", color:{ rgb:"FFDDDDDD" } },
+      right:  { style:"thin", color:{ rgb:"FFDDDDDD" } }
+    }
+  };
+  if (fillHex) {
+    cell.s.fill = { patternType: "solid", fgColor: { rgb: argb(fillHex) } };
+  }
+  return cell;
+}
+
+
 function makeCellCenter(value, fillHex, bold=false) {
   const cell = makeCell(value, fillHex, bold);
   cell.s.alignment = { vertical: "center", horizontal: "center", wrapText: true };
   return cell;
 }
 
-function exportCalendarXLSX(filteredRows) {
+function exportCalendarXLSX(filteredRows, win) {
   if (!window.XLSX) {
     alert("XLSX library not loaded. Check the xlsx-js-style script tag.");
     return;
@@ -484,10 +523,15 @@ function exportCalendarXLSX(filteredRows) {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
   });
 
-  const url = URL.createObjectURL(blob);
-  const win = window.open(url, "_blank");
+ const url = URL.createObjectURL(blob);
 
-  if (!win) {
+// If we already opened a tab, reuse it
+if (win && !win.closed) {
+  win.location.href = url;
+} else {
+  const newWin = window.open(url, "_blank");
+  if (!newWin) {
+    // fallback download
     const a = document.createElement("a");
     a.href = url;
     a.download = "CIP_Gantt_Calendar_Filtered.xlsx";
@@ -495,6 +539,10 @@ function exportCalendarXLSX(filteredRows) {
     a.click();
     a.remove();
   }
+}
+
+setTimeout(() => URL.revokeObjectURL(url), 60_000);
+
 
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
@@ -502,9 +550,14 @@ function exportCalendarXLSX(filteredRows) {
 // Wire up the new button
 if (exportCalendarXlsxBtn) {
   exportCalendarXlsxBtn.addEventListener("click", () => {
-    exportCalendarXLSX(lastRender.filteredRows);
+    // Open a blank tab immediately (popup blockers like this pattern)
+    const win = window.open("about:blank", "_blank");
+
+    // Build the file and then navigate that tab to the blob URL
+    exportCalendarXLSX(lastRender.filteredRows, win);
   });
 }
+
 
 
     // -----------------------------
