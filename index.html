@@ -90,6 +90,8 @@
 
         <button id="clearBtn" class="btn" type="button">Clear</button>
         <button id="exportXlsxBtn" class="btn" type="button">Export XLSX</button>
+        <button id="exportCalendarXlsxBtn" class="btn" type="button">Export Calendar XLSX</button>
+
 
 
       </div>
@@ -511,6 +513,148 @@ exportXlsxBtn.addEventListener("click", () => {
   // lastRender comes from applyFilter(...) which returns filteredRows + items
   exportProjectsXLSX(lastRender.filteredRows);
 });
+const exportCalendarXlsxBtn = document.getElementById("exportCalendarXlsxBtn");
+
+// 12-month window matching your chart
+const MONTHS = [
+  { label: "Oct 2025", start: new Date("2025-10-01T00:00:00"), end: new Date("2025-11-01T00:00:00") },
+  { label: "Nov 2025", start: new Date("2025-11-01T00:00:00"), end: new Date("2025-12-01T00:00:00") },
+  { label: "Dec 2025", start: new Date("2025-12-01T00:00:00"), end: new Date("2026-01-01T00:00:00") },
+  { label: "Jan 2026", start: new Date("2026-01-01T00:00:00"), end: new Date("2026-02-01T00:00:00") },
+  { label: "Feb 2026", start: new Date("2026-02-01T00:00:00"), end: new Date("2026-03-01T00:00:00") },
+  { label: "Mar 2026", start: new Date("2026-03-01T00:00:00"), end: new Date("2026-04-01T00:00:00") },
+  { label: "Apr 2026", start: new Date("2026-04-01T00:00:00"), end: new Date("2026-05-01T00:00:00") },
+  { label: "May 2026", start: new Date("2026-05-01T00:00:00"), end: new Date("2026-06-01T00:00:00") },
+  { label: "Jun 2026", start: new Date("2026-06-01T00:00:00"), end: new Date("2026-07-01T00:00:00") },
+  { label: "Jul 2026", start: new Date("2026-07-01T00:00:00"), end: new Date("2026-08-01T00:00:00") },
+  { label: "Aug 2026", start: new Date("2026-08-01T00:00:00"), end: new Date("2026-09-01T00:00:00") },
+  { label: "Sep 2026", start: new Date("2026-09-01T00:00:00"), end: new Date("2026-10-01T00:00:00") }
+];
+
+// Phase definitions for the calendar export (start, end, fill color, optional short label)
+const CAL_PHASES = [
+  { key: "design", label: "DES", start: "InDesignorProcurementDate", end: "InDesignorProcurementEnd", fill: "#1565c0" },
+  { key: "active", label: "ACT", start: "ActiveImplementationConstructionDate", end: "ActiveImplementationConstructionEnd", fill: "#7ec8ff" },
+  { key: "sub",   label: "SUB", start: "SubstantialCompletionorTestingDate", end: "SubstantialCompletionorTestingEnd", fill: "#f2c6a0" },
+  { key: "closed",label: "CLS", start: "ClosedorCompleteDate", end: "ClosedorCompleteEnd", fill: "#2e7d32" },
+  { key: "hold",  label: "HLD", start: "OnHold", end: "OnHoldEnd", fill: "#7b1fa2" },
+  { key: "risk",  label: "RSK", start: "AtRiskorDelayed", end: "AtRiskorDelayedEnd", fill: "#c62828" }
+];
+
+// Overlap test: month [ms,me) overlaps interval [s,e]
+function overlaps(monthStart, monthEnd, s, e) {
+  return s < monthEnd && e > monthStart;
+}
+
+function makeCellCenter(value, fillHex, bold=false) {
+  const cell = makeCell(value, fillHex, bold);
+  cell.s.alignment = { vertical: "center", horizontal: "center", wrapText: true };
+  return cell;
+}
+
+function exportCalendarXLSX(filteredRows) {
+  if (!window.XLSX) {
+    alert("XLSX library not loaded. Check the xlsx-js-style script tag.");
+    return;
+  }
+
+  // Sort by ProjectID
+  const rows = [...filteredRows].sort((a,b) => {
+    const ai = a[PROJECT_ID_FIELD], bi = b[PROJECT_ID_FIELD];
+    if (ai == null) return 1;
+    if (bi == null) return -1;
+    return ai > bi ? 1 : ai < bi ? -1 : 0;
+  });
+
+  const header = ["ProjectID", "Public_Project_Name", "Contact_Name", ...MONTHS.map(m => m.label)];
+
+  const ws = {};
+  const range = { s: { r:0, c:0 }, e: { r: rows.length, c: header.length-1 } };
+
+  // Header row
+  for (let c = 0; c < header.length; c++) {
+    ws[XLSX.utils.encode_cell({ r:0, c })] = makeCell(header[c], "#F2F2F2", true);
+  }
+
+  // Data rows
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const excelRow = i + 1;
+
+    ws[XLSX.utils.encode_cell({ r: excelRow, c: 0 })] = makeCell(String(r[PROJECT_ID_FIELD] ?? ""), null);
+    ws[XLSX.utils.encode_cell({ r: excelRow, c: 1 })] = makeCell(String(r[PROJECT_NAME_FIELD] ?? ""), null);
+    ws[XLSX.utils.encode_cell({ r: excelRow, c: 2 })] = makeCell(String(r[CONTACT_FIELD] ?? ""), null);
+
+    // Pre-parse phase intervals for this project (skip phases missing start OR end)
+    const intervals = [];
+    for (const p of CAL_PHASES) {
+      const s = parseDate(r[p.start]);
+      const e = parseDate(r[p.end]);
+      if (s && e) intervals.push({ ...p, s, e });
+    }
+
+    // Fill month cells
+    for (let m = 0; m < MONTHS.length; m++) {
+      const month = MONTHS[m];
+
+      // Find all phases that overlap this month
+      const hits = intervals.filter(iv => overlaps(month.start, month.end, iv.s, iv.e));
+
+      if (hits.length === 0) {
+        ws[XLSX.utils.encode_cell({ r: excelRow, c: 3 + m })] = makeCellCenter("", null);
+        continue;
+      }
+
+      // If multiple overlaps, choose the one with the latest start date
+      hits.sort((a,b) => b.s - a.s);
+      const chosen = hits[0];
+
+      // If you want NO text inside colored cells, set value "" instead of chosen.label
+      ws[XLSX.utils.encode_cell({ r: excelRow, c: 3 + m })] = makeCellCenter(chosen.label, chosen.fill);
+    }
+  }
+
+  ws["!ref"] = XLSX.utils.encode_range(range);
+
+  // Column widths: ID, Name, Contact, then months
+  ws["!cols"] = [
+    { wch: 12 },  // ProjectID
+    { wch: 42 },  // Name
+    { wch: 24 },  // Contact
+    ...MONTHS.map(() => ({ wch: 10 }))
+  ];
+
+  ws["!freeze"] = { xSplit: 3, ySplit: 1 }; // freeze ID/Name/Contact + header
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Calendar View");
+
+  const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([wbout], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+
+  const url = URL.createObjectURL(blob);
+  const win = window.open(url, "_blank");
+
+  if (!win) {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "CIP_Gantt_Calendar_Filtered.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// Wire up the new button
+if (exportCalendarXlsxBtn) {
+  exportCalendarXlsxBtn.addEventListener("click", () => {
+    exportCalendarXLSX(lastRender.filteredRows);
+  });
+}
 
 
     // -----------------------------
