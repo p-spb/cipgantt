@@ -24,10 +24,30 @@
     #status { opacity: .75; }
     #timeline { flex: 1; }
 
-    /* Non-interactive */
-    #timeline { pointer-events: none; }
-    .vis-item { pointer-events: none; }
-    .vis-custom-time { pointer-events: none; }
+    /* Controls */
+    #controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .ctl {
+      padding: 6px 10px;
+      border: 1px solid rgba(0,0,0,.2);
+      border-radius: 8px;
+      font-size: 14px;
+      background: #fff;
+    }
+    #contactSelect { min-width: 280px; }
+    .btn {
+      padding: 6px 10px;
+      border: 1px solid rgba(0,0,0,.2);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn:hover { background: rgba(0,0,0,.04); }
+
+    /* Non-interactive timeline only */
+    .timelineNonInteractive #timeline { pointer-events: none; }
+    .timelineNonInteractive .vis-item { pointer-events: none; }
+    .timelineNonInteractive .vis-custom-time { pointer-events: none; }
 
     /* Segment colors by status */
     .seg-closed { background: #2e7d32; border-color: #2e7d32; color: #fff; }         /* green */
@@ -46,15 +66,33 @@
       background-color: rgba(0,0,0,0.35);
       width: 2px;
     }
+
+    /* Left label as "ID  Name" */
+    .vis-group-content { white-space: nowrap; }
+    .vis-group-content strong {
+      display: inline-block;
+      min-width: 70px;
+      text-align: right;
+    }
   </style>
 </head>
 
-<body>
+<body class="timelineNonInteractive">
   <div id="wrap">
     <div id="header">
       <strong>CIP Timeline</strong>
+
+      <div id="controls">
+        <label style="opacity:.8;">Contact:</label>
+        <select id="contactSelect" class="ctl" title="Filter by Contact_Name"></select>
+
+        <button id="clearBtn" class="btn" type="button">Clear</button>
+        <button id="exportBtn" class="btn" type="button">Export CSV</button>
+      </div>
+
       <span id="status"></span>
     </div>
+
     <div id="timeline"></div>
   </div>
 
@@ -68,25 +106,72 @@
 
     const PROJECT_ID_FIELD = "ProjectID";
     const PROJECT_NAME_FIELD = "Public_Project_Name";
+    const CONTACT_FIELD = "Contact_Name";
 
-    const STATUSES = [
-      { key: "InDesignorProcurementDate", label: "In Design / Procurement", className: "seg-design" },
-      { key: "ActiveImplementationConstructionDate", label: "Active Implementation / Construction", className: "seg-active" },
-      { key: "SubstantialCompletionorTestingDate", label: "Substantial Completion / Testing", className: "seg-substantial" },
-      { key: "ClosedorCompleteDate", label: "Closed / Complete", className: "seg-closed" },
-      { key: "OnHold", label: "On Hold", className: "seg-hold" },
-      { key: "AtRiskorDelayed", label: "At Risk / Delayed", className: "seg-risk" }
+    // Start + End fields per phase (explicit)
+    const PHASES = [
+      {
+        startKey: "InDesignorProcurementDate",
+        endKey:   "InDesignorProcurementEnd",
+        label: "In Design / Procurement",
+        className: "seg-design"
+      },
+      {
+        startKey: "ActiveImplementationConstructionDate",
+        endKey:   "ActiveImplementationConstructionEnd",
+        label: "Active Implementation / Construction",
+        className: "seg-active"
+      },
+      {
+        startKey: "SubstantialCompletionorTestingDate",
+        endKey:   "SubstantialCompletionorTestingEnd",
+        label: "Substantial Completion / Testing",
+        className: "seg-substantial"
+      },
+      {
+        startKey: "ClosedorCompleteDate",
+        endKey:   "ClosedorCompleteEnd",
+        label: "Closed / Complete",
+        className: "seg-closed"
+      },
+      {
+        startKey: "OnHold",
+        endKey:   "OnHoldEnd",
+        label: "On Hold",
+        className: "seg-hold"
+      },
+      {
+        startKey: "AtRiskorDelayed",
+        endKey:   "AtRiskorDelayedEnd",
+        label: "At Risk / Delayed",
+        className: "seg-risk"
+      }
     ];
 
     // Visible window: Oct 2025 through Sep 2026
     const MIN_START = new Date("2025-10-01T00:00:00");
     const MAX_END   = new Date("2026-09-30T23:59:59");
 
+    // IMPORTANT BEHAVIOR:
+    // If a phase has a start date but NO end date, do NOT draw it.
+    // (This removes the old "ends at today" behavior.)
+    const DRAW_OPEN_ENDED_PHASES = false;
+
+    // If you ever set DRAW_OPEN_ENDED_PHASES = true, choose what the fallback end should be:
+    // const OPEN_END_FALLBACK = MAX_END; // or new Date() if you want ongoing-to-today
+    const OPEN_END_FALLBACK = MAX_END;
+
     // -----------------------------
     // HELPERS
     // -----------------------------
     const statusEl = document.getElementById("status");
     const layerUrl = `${FEATURESERVER_URL}/${LAYER_INDEX}`;
+
+    const contactSelect = document.getElementById("contactSelect");
+    const clearBtn = document.getElementById("clearBtn");
+    const exportBtn = document.getElementById("exportBtn");
+
+    function norm(v) { return (v ?? "").toString().trim().toLowerCase(); }
 
     function parseDate(val) {
       if (val === null || val === undefined || val === "") return null;
@@ -102,8 +187,19 @@
       return isNaN(d) ? null : d;
     }
 
+    function isoDate(d) {
+      const pad = n => String(n).padStart(2,"0");
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    }
+
     async function fetchAllRows() {
-      const outFields = [PROJECT_ID_FIELD, PROJECT_NAME_FIELD, ...STATUSES.map(s => s.key)].join(",");
+      const outFields = [
+        PROJECT_ID_FIELD,
+        PROJECT_NAME_FIELD,
+        CONTACT_FIELD,
+        ...PHASES.flatMap(p => [p.startKey, p.endKey])
+      ].join(",");
+
       const pageSize = 2000;
       let offset = 0;
       let all = [];
@@ -120,7 +216,6 @@
 
         const resp = await fetch(`${layerUrl}/query?${params.toString()}`);
         const json = await resp.json();
-
         if (json.error) throw new Error(`${json.error.code}: ${json.error.message}`);
 
         const rows = (json.features || []).map(f => f.attributes);
@@ -133,102 +228,72 @@
       return all;
     }
 
+    // Build one group per project + segments from explicit start/end fields
     function buildGroupsAndItems(rows) {
-      const today = new Date();
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
       const groups = [];
       const items = [];
 
+      // Sort by ProjectID
       rows.sort((a, b) => {
-  const ai = a[PROJECT_ID_FIELD];
-  const bi = b[PROJECT_ID_FIELD];
-
-  // numeric-safe sort (handles strings too)
-  if (ai == null) return 1;
-  if (bi == null) return -1;
-  return ai > bi ? 1 : ai < bi ? -1 : 0;
-});
-
+        const ai = a[PROJECT_ID_FIELD];
+        const bi = b[PROJECT_ID_FIELD];
+        if (ai == null) return 1;
+        if (bi == null) return -1;
+        return ai > bi ? 1 : ai < bi ? -1 : 0;
+      });
 
       for (const r of rows) {
         const pid = r[PROJECT_ID_FIELD];
         const pname = (r[PROJECT_NAME_FIELD] ?? "(Unnamed Project)").toString();
 
         groups.push({
-  id: String(pid),
-  content: `<strong>${pid}</strong>&nbsp;&nbsp;${pname}`
-});
+          id: String(pid),
+          content: `<strong>${pid}</strong>&nbsp;&nbsp;${pname}`
+        });
 
+        for (const phase of PHASES) {
+          const startRaw = parseDate(r[phase.startKey]);
+          if (!startRaw) continue;
 
-        // Gather any status dates (unordered)
-        const starts = [];
-        for (const s of STATUSES) {
-          const d = parseDate(r[s.key]);
-          if (d) starts.push({ status: s, start: d });
-        }
-        if (starts.length === 0) continue;
+          let endRaw = parseDate(r[phase.endKey]);
 
-        // Sort chronologically (statuses don't need to be in a fixed order)
-        starts.sort((a, b) => a.start - b.start);
+          // If no end value: either skip or use fallback (but NOT "today" per your request)
+          if (!endRaw) {
+            if (!DRAW_OPEN_ENDED_PHASES) continue;
+            endRaw = OPEN_END_FALLBACK;
+          }
 
-        for (let i = 0; i < starts.length; i++) {
-          const cur = starts[i];
-          const next = starts[i + 1] || null;
+          // Clamp start/end to window
+          const start = (startRaw < MIN_START) ? MIN_START : startRaw;
+          let end = endRaw;
+          if (end > MAX_END) end = MAX_END;
 
-const startRaw = cur.start;
+          // Minimum visible duration if equal/invalid
+          if (end <= start) {
+            const bumped = new Date(start.getTime() + ONE_DAY_MS);
+            end = (bumped > MAX_END) ? MAX_END : bumped;
+          }
 
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
-// Determine the raw end
-let rawEnd;
-
-if (next) {
-  // Normal case: end at the next status start
-  rawEnd = next.start;
-
-  // If next status has the same timestamp (or earlier due to data issues),
-  // force a minimum visible duration.
-  if (rawEnd <= startRaw) rawEnd = new Date(startRaw.getTime() + ONE_DAY_MS);
-} else {
-  // LAST status for the project
-  const isActiveImpl = cur.status.key === "ActiveImplementationConstructionDate";
-
-  if (isActiveImpl) {
-    // Active should only run to "today" if it has already started.
-    // If it starts in the future, show it planned through end of window.
-    rawEnd = (startRaw <= today) ? today : MAX_END;
-  } else {
-    // Any other final status runs to end of window
-    rawEnd = MAX_END;
-  }
-}
-
-// Clamp to requested window
-const start = (startRaw < MIN_START) ? MIN_START : startRaw;
-
-let end = rawEnd;
-if (end > MAX_END) end = MAX_END;
-
-// If clamping made it zero-length, force minimum duration (still within window)
-if (end <= start) {
-  const bumped = new Date(start.getTime() + ONE_DAY_MS);
-  end = (bumped > MAX_END) ? MAX_END : bumped;
-}
-
-// Skip if completely outside window
-if (start >= MAX_END) continue;
-if (end <= start) continue;
-
-
+          // Skip if outside
+          if (start >= MAX_END) continue;
+          if (end <= start) continue;
 
           items.push({
-            id: `${pid}-${cur.status.key}`,
+            id: `${pid}-${phase.startKey}`,
             group: String(pid),
-            content: cur.status.label,   // set "" if you want bars without text
+            content: phase.label,
             start,
             end,
             type: "range",
-            className: cur.status.className
+            className: phase.className,
+
+            // for export
+            _projectId: pid,
+            _projectName: pname,
+            _contact: (r[CONTACT_FIELD] ?? "").toString(),
+            _phase: phase.label
           });
         }
       }
@@ -237,44 +302,160 @@ if (end <= start) continue;
     }
 
     // -----------------------------
+    // FILTERING (dropdown only)
+    // -----------------------------
+    function populateContactDropdown(allRows) {
+      const set = new Set();
+      for (const r of allRows) {
+        const v = (r[CONTACT_FIELD] ?? "").toString().trim();
+        if (v) set.add(v);
+      }
+      const contacts = Array.from(set).sort((a,b)=>a.localeCompare(b));
+
+      contactSelect.innerHTML = "";
+
+      const optAll = document.createElement("option");
+      optAll.value = "";
+      optAll.textContent = "All contacts";
+      contactSelect.appendChild(optAll);
+
+      const optBlank = document.createElement("option");
+      optBlank.value = "__BLANK__";
+      optBlank.textContent = "(No contact name)";
+      contactSelect.appendChild(optBlank);
+
+      for (const c of contacts) {
+        const opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = c;
+        contactSelect.appendChild(opt);
+      }
+    }
+
+    function filterRows(allRows) {
+      const sel = contactSelect.value;
+
+      return allRows.filter(r => {
+        const c = (r[CONTACT_FIELD] ?? "").toString().trim();
+        if (sel === "__BLANK__") return !c;
+        if (sel) return c === sel;
+        return true;
+      });
+    }
+
+    function applyFilter(allRows, groupsDS, itemsDS) {
+      const filteredRows = filterRows(allRows);
+      const { groups, items } = buildGroupsAndItems(filteredRows);
+
+      groupsDS.clear(); groupsDS.add(groups);
+      itemsDS.clear();  itemsDS.add(items);
+
+      statusEl.textContent = `${groups.length} projects, ${items.length} segments`;
+      return { filteredRows, items };
+    }
+
+    // -----------------------------
+    // EXPORT CSV (segments)
+    // -----------------------------
+    function csvEscape(v) {
+      const s = (v ?? "").toString();
+      const needs = /[",\n]/.test(s);
+      const escaped = s.replace(/"/g, '""');
+      return needs ? `"${escaped}"` : escaped;
+    }
+
+    function downloadCSV(filename, lines) {
+      const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function exportSegmentsCSV(items) {
+      const header = [
+        "ProjectID",
+        "Public_Project_Name",
+        "Contact_Name",
+        "Phase",
+        "SegmentStart",
+        "SegmentEnd"
+      ];
+
+      const lines = [header.map(csvEscape).join(",")];
+
+      for (const it of items) {
+        lines.push([
+          it._projectId,
+          it._projectName,
+          it._contact,
+          it._phase,
+          isoDate(it.start),
+          isoDate(it.end)
+        ].map(csvEscape).join(","));
+      }
+
+      downloadCSV("CIP_Gantt_Filtered_Segments.csv", lines);
+    }
+
+    // -----------------------------
     // RUN
     // -----------------------------
     (async () => {
+      let allRows = [];
       try {
         statusEl.textContent = "Loading…";
+        allRows = await fetchAllRows();
 
-        const rows = await fetchAllRows();
-        const { groups, items } = buildGroupsAndItems(rows);
+        populateContactDropdown(allRows);
 
-        statusEl.textContent = `${groups.length} projects, ${items.length} segments`;
-
-        const groupsDS = new vis.DataSet(groups);
-        const itemsDS = new vis.DataSet(items);
+        const groupsDS = new vis.DataSet([]);
+        const itemsDS = new vis.DataSet([]);
 
         const container = document.getElementById("timeline");
         const options = {
           stack: false,
           horizontalScroll: true,
           zoomKey: "ctrlKey",
-
           min: MIN_START,
           max: MAX_END,
-
           start: MIN_START,
           end: MAX_END,
-
           orientation: "top",
           margin: { item: 6, axis: 8 }
         };
 
         const timeline = new vis.Timeline(container, itemsDS, groupsDS, options);
 
-        // Today vertical line (clamped into the window)
+        // Today vertical line (clamped into window)
         const now = new Date();
         const todayClamped = (now < MIN_START) ? MIN_START : (now > MAX_END) ? MAX_END : now;
         timeline.addCustomTime(todayClamped, "today");
         const todayBar = timeline.customTimes["today"];
         if (todayBar && todayBar.bar) todayBar.bar.classList.add("today-line");
+
+        // Initial render
+        let lastRender = applyFilter(allRows, groupsDS, itemsDS);
+
+        // Events
+        function rerender() {
+          lastRender = applyFilter(allRows, groupsDS, itemsDS);
+        }
+
+        contactSelect.addEventListener("change", rerender);
+
+        clearBtn.addEventListener("click", () => {
+          contactSelect.value = "";
+          rerender();
+        });
+
+        exportBtn.addEventListener("click", () => {
+          exportSegmentsCSV(lastRender.items);
+        });
 
       } catch (e) {
         console.error(e);
@@ -282,13 +463,10 @@ if (end <= start) continue;
         document.getElementById("timeline").innerHTML =
           `<div style="padding:12px;font-family:system-ui;color:#b00;">
              CIP Timeline Error: ${e.message}<br>
-             Failed to load. Check layer index, field names, and sharing permissions.
+             Failed to load. Check layer index and field names (including new End fields).
            </div>`;
       }
     })();
   </script>
 </body>
 </html>
-
-
-
